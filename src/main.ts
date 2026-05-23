@@ -400,13 +400,13 @@ const Y_EXP = 5 * LINE_H
 
 function rightValuesForScreen(): RightValue[] {
   if (screen === 'quest') {
-    const countdown = `[${formatCountdown(msUntilNextUtcMidnight(Date.now()))}]`
+    const countdown = formatCountdown(msUntilNextUtcMidnight(Date.now()))
     const out: RightValue[] = [
       { cid: CID_RIGHT_HEAD, text: countdown, yPosition: Y_HEADER },
     ]
     state.quests.forEach((q, i) => {
       const cid = [CID_RIGHT_Q1, CID_RIGHT_Q2, CID_RIGHT_Q3, CID_RIGHT_Q4][i]!
-      out.push({ cid, text: `[${progressLabel(q)}]`, yPosition: Y_Q_BASE + i * LINE_H })
+      out.push({ cid, text: progressLabel(q), yPosition: Y_Q_BASE + i * LINE_H })
     })
     out.push({ cid: CID_RIGHT_EXP, text: '', yPosition: Y_EXP })
     return out
@@ -489,9 +489,13 @@ const RIGHT_OUTER_W = RIGHT_INNER_W + 2 * PAD
 // Anchor right edge of these containers WELL inside the waveguide safe zone.
 // The G2's 576px raw frame extends beyond the visible/comfortable viewing
 // area — content near the right edge gets clipped or pushed out of focus.
-// Live-tested: anchoring ~80px in from the right edge keeps the value
-// visible and aligned with the left content's right `|` frame bar.
-const RIGHT_GUTTER = 80
+// Live-tested iterations:
+//   gutter=12  → values clipped, only `|` brackets visible at far right
+//   gutter=80  → values still outside visible zone
+//   gutter=180 → values land mid-screen, way too far left
+//   gutter=100 → values readable but still want them pushed right
+//   gutter=60  → current target
+const RIGHT_GUTTER = 60
 const RIGHT_X = SCREEN_W - RIGHT_OUTER_W - RIGHT_GUTTER
 
 function makeRightContainer(cid: number, y: number, name: string): TextContainerProperty {
