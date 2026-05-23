@@ -229,9 +229,15 @@ function center(s: string, width = COLS): string {
   return ' '.repeat(left) + s
 }
 
-const FRAME_LINE = '+' + '-'.repeat(COLS - 2) + '+'
+// Frame chars: only top/bottom dividers + LEFT vertical bar. We drop the RIGHT
+// vertical bar because the right-aligned value containers sit in that pixel
+// region and would either collide with it or be invisible past the waveguide's
+// safe zone. The frame looks like a "[" bracket opening to the right; right
+// values float in the unframed space.
+const FRAME_LINE = '+' + '-'.repeat(COLS - 2)
 function framed(line: string): string {
-  return `|${pad(line, COLS - 2)}|`
+  // Left bar `|`, content padded to inner width, NO right bar.
+  return `|${pad(line, COLS - 2)}`
 }
 
 // ─── LEFT container content (the bulk of the layout) ─────────────────────────
@@ -480,9 +486,12 @@ const leftContainer = new TextContainerProperty({
 
 const RIGHT_INNER_W = 110   // max pixel budget for a right-aligned value (12 chars * ~9px)
 const RIGHT_OUTER_W = RIGHT_INNER_W + 2 * PAD
-// Anchor right edge of these containers to the screen's right edge minus the
-// LEFT container's frame `|` bar (~9 px) and a small gutter.
-const RIGHT_GUTTER = 12  // space for `|` frame bar + margin
+// Anchor right edge of these containers WELL inside the waveguide safe zone.
+// The G2's 576px raw frame extends beyond the visible/comfortable viewing
+// area — content near the right edge gets clipped or pushed out of focus.
+// Live-tested: anchoring ~80px in from the right edge keeps the value
+// visible and aligned with the left content's right `|` frame bar.
+const RIGHT_GUTTER = 80
 const RIGHT_X = SCREEN_W - RIGHT_OUTER_W - RIGHT_GUTTER
 
 function makeRightContainer(cid: number, y: number, name: string): TextContainerProperty {
