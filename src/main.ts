@@ -209,15 +209,17 @@ function pad(s: string, width: number, align: 'left' | 'right' = 'left'): string
   return align === 'left' ? s + fill : fill + s
 }
 
-// Ornate box-drawing frame, Hunter-System flavour. LVGL renders unicode box chars.
-const FRAME_TOP    = '╔' + '═'.repeat(COLS - 2) + '╗'
-const FRAME_MID    = '╠' + '═'.repeat(COLS - 2) + '╣'
-const FRAME_BOT    = '╚' + '═'.repeat(COLS - 2) + '╝'
+// ASCII frame — G2 LVGL font lacks Unicode box-drawing glyphs (verified on
+// hardware: the double-pipe chars render as blanks/rectangles). Stick to
+// plain ASCII so the frame survives the on-device renderer.
+const FRAME_TOP    = '+' + '-'.repeat(COLS - 2) + '+'
+const FRAME_MID    = '+' + '-'.repeat(COLS - 2) + '+'
+const FRAME_BOT    = '+' + '-'.repeat(COLS - 2) + '+'
 
 function framed(line: string): string {
   // Trim/pad inner content to COLS - 2.
   const inner = pad(line, COLS - 2)
-  return `║${inner}║`
+  return `|${inner}|`
 }
 
 function progressLabel(q: QuestState): string {
@@ -251,7 +253,7 @@ function renderDisclaimer(): string {
     center('before any exercise program. We accept'),
     center('no responsibility for injury or illness.'),
     '',
-    center('— tap to accept —'),
+    center('-- tap to accept --'),
   ]
   return body.join('\n')
 }
@@ -271,7 +273,7 @@ function renderQuest(): string {
   const lines: string[] = []
   lines.push(header)
   lines.push(FRAME_TOP)
-  lines.push(framed('  [!] QUEST INFO — DAILY QUEST'))
+  lines.push(framed('  [!] QUEST INFO - DAILY QUEST'))
   lines.push(framed('  TRAIN TO BECOME A FORMIDABLE COMBATANT'))
   lines.push(FRAME_MID)
 
@@ -289,7 +291,7 @@ function renderQuest(): string {
 
   lines.push(FRAME_BOT)
   if (cleared) {
-    lines.push(center('— ALL CLEAR · banks at 00:00 UTC —'))
+    lines.push(center('-- ALL CLEAR - banks at 00:00 UTC --'))
   }
   return lines.join('\n')
 }
@@ -298,12 +300,12 @@ function renderStatus(): string {
   const { level, expInLevel } = levelFromExp(state.totalExp)
   const rank = rankFor(state.streak)
   const nextRank = nextRankThreshold(state.streak)
-  const toNextRank = nextRank == null ? '— MAX —' : `${nextRank - state.streak} day(s)`
+  const toNextRank = nextRank == null ? '-- MAX --' : `${nextRank - state.streak} day(s)`
 
-  // EXP bar — 30 cells wide.
+  // EXP bar — 30 cells wide. ASCII chars only (G2 font lacks block glyphs).
   const barCells = 30
   const filled = Math.round((expInLevel / EXP_PER_LEVEL) * barCells)
-  const bar = '█'.repeat(filled) + '░'.repeat(barCells - filled)
+  const bar = '#'.repeat(filled) + '.'.repeat(barCells - filled)
 
   const lines: string[] = []
   lines.push(FRAME_TOP)
@@ -315,7 +317,7 @@ function renderStatus(): string {
   lines.push(framed(`  TOTAL DAYS   ${state.totalDays}`))
   lines.push(framed(`  NEXT RANK    ${toNextRank}`))
   lines.push(FRAME_BOT)
-  lines.push(center('— double-tap to return —'))
+  lines.push(center('-- double-tap to return --'))
   return lines.join('\n')
 }
 
@@ -329,7 +331,7 @@ function renderPenalty(): string {
     framed('  PENALTIES HAVE BEEN GIVEN'),
     framed('  ACCORDINGLY. STREAK RESET.'),
     FRAME_BOT,
-    center('— tap to continue —'),
+    center('-- tap to continue --'),
   ].join('\n')
 }
 
@@ -345,7 +347,7 @@ function renderClear(): string {
     framed(`  STREAK   x${state.streak}    RANK   ${rank}`),
     framed(`  LEVEL    ${level}`),
     FRAME_BOT,
-    center('— tap to continue —'),
+    center('-- tap to continue --'),
   ].join('\n')
 }
 
