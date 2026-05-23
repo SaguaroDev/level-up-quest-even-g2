@@ -1,71 +1,99 @@
 # Level Up Quest
 
-Even Realities G2 habit-tracking app. Pick four daily quests at setup, complete all four before midnight UTC, your streak grows by one. Miss any quest, streak resets to zero.
+A Solo Leveling-style habit-tracking game for the Even Realities G2. The System hands you a Daily Quest. Clear it before UTC midnight or face a Penalty.
 
-The exercises shown by default (run, pushups, situps, squats) are placeholders. You pick from a small library and lock the set in at setup. The set only changes if you reset the app, which also zeros your streak.
+## The Daily Quest
+
+The System dictates the quest set. You don't pick — Sung Jin-Woo didn't either.
+
+```
+[!] QUEST INFO — DAILY QUEST
+TRAIN TO BECOME A FORMIDABLE COMBATANT
+
+> [ ] PUSH-UPS                                [45/100]
+  [x] SIT-UPS                                [100/100]
+  [ ] SQUATS                                  [20/100]
+  [ ] RUN                                   [3.5/10KM]
+```
+
+Tap to log progress on the highlighted goal. Swipe to move the highlight. Double-tap to flip between the Quest panel and your Hunter Status.
+
+Clear all four before 00:00 UTC and the streak banks. Miss any goal and the Penalty Zone screen greets you on the next launch.
 
 ## Health disclaimer
 
-Level Up Quest is a habit-tracking game. The exercises you choose to perform are your responsibility. Consult a physician before beginning any exercise program. The authors accept no responsibility for injury, illness, or any consequence of following self-selected quests.
+A habit-tracking game. The exercises you choose to perform are your responsibility. Consult a physician before any exercise program. The authors accept no responsibility for injury, illness, or any consequence of following self-selected quests.
 
 ## Mechanics
 
-- Four quests, locked at setup
-- Tap to highlight, long-press to check off
-- Streak +1 if all four are checked at UTC midnight rollover
-- Streak resets to 0 if any quest is missed
-- All state persists on-device via the Even Hub SDK's local storage — no servers, no accounts, no tracking
-- Reset (from Settings) zeroes streak, best streak, total days, and lets you re-pick your four quests
+- One fixed quest set: 100 push-ups, 100 sit-ups, 100 squats, 10 km run
+- Tap on the highlighted goal adds an increment (5 reps, or 0.5 km)
+- Clear all four by UTC midnight → streak +1, EXP awarded, day banked
+- Miss any goal → Penalty Zone, streak resets to 0
+- All state persists on-device via the Even Hub SDK's `setLocalStorage` — no servers, no accounts, no telemetry
 
-## Screens
+## Hunter rank
 
-| Screen | Purpose |
+| Rank | Streak required |
 |---|---|
-| Disclaimer | First-launch health acceptance (one-time) |
-| Setup — Pick | Choose 4 quests from the library |
-| Setup — Confirm | Lock in the four-quest set |
-| Today | Daily check-off, streak, countdown to UTC reset |
-| Stats | Current streak, best streak, total days cleared |
-| Settings | Full reset (clears streak) |
+| E | 0 |
+| D | 3 |
+| C | 7 |
+| B | 14 |
+| A | 30 |
+| S | 60 |
+
+## EXP / Levels
+
+- 100 base EXP per cleared day
+- +10 EXP per day past streak 7 (compounding into a long run)
+- 1000 EXP per level. Linear curve, no soft cap.
 
 ## Controls
 
 | Gesture | Action |
 |---|---|
-| Single tap | Advance highlight |
-| Long press | Toggle / confirm / accept |
-| Swipe down | Next screen (forward) |
-| Swipe up | Previous screen (back) |
-| Double tap | Exit app |
+| Single tap | +increment on highlighted goal (Quest screen) / advance dialog |
+| Swipe up | Move highlight up |
+| Swipe down | Move highlight down |
+| Double tap | Cycle Quest ↔ Status |
+| Long press | OS-reserved — opens system menu, never reaches the app |
 
-## Quest library
+The System doesn't let you walk out. To exit the app, use the OS long-press menu.
 
-Run · Pushups · Situps · Squats · Pullups · Plank · Meditate · Read · Water
+## Screens
+
+- **Disclaimer** — first-launch health acceptance, one-time
+- **Quest** — Daily Quest panel with header strip (rank · streak · countdown to UTC midnight)
+- **Status** — Hunter level, EXP gauge, current/best streak, total days cleared, days to next rank
+- **Quest Complete** — flashes once when you clear the daily; banks at UTC midnight
+- **Penalty Zone** — shown once on the launch after a missed daily
 
 ## Develop
 
 ```bash
 npm install
-npm run dev                                     # browser companion at http://localhost:5173
-npx evenhub-simulator http://localhost:5173     # desktop simulator
-ipconfig getifaddr en1                          # find LAN IP
-npx evenhub qr --url http://<lan-ip>:5173       # scan in Even Hub companion app on phone
+npm run dev                                          # browser companion at http://localhost:5173
+npx evenhub-simulator http://localhost:5173          # desktop simulator (no IMU)
+ipconfig getifaddr en1                               # find LAN IP
+npx @evenrealities/evenhub-cli qr --url http://<lan-ip>:5173   # scan in Even Hub companion app
 ```
+
+The Vite dev server may fall back to a port other than 5173 if 5173 is taken — use whatever port the `npm run dev` output prints.
 
 ## Build for distribution
 
 ```bash
 npm run build
-npm run pack                                    # produces .ehpk for Even Hub upload
+npm run pack                                         # produces .ehpk for Even Hub upload
 ```
 
 ## Tech notes
 
-- `@evenrealities/even_hub_sdk` 0.0.10
-- TypeScript / Vite
+- `@evenrealities/even_hub_sdk` 0.0.10, TypeScript / Vite
 - All state in `bridge.setLocalStorage("luq.state", ...)` — survives app restart
-- Background→foreground state position falls back to Today on resume (cold-restart state preserved). The `setBackgroundState` / `onBackgroundRestore` API documented in the everything-evenhub skill catalog is not yet exposed by the public SDK at this version; will wire in once available.
-- UTC midnight rollover detected on `FOREGROUND_ENTER_EVENT` and on a 30s timer while the Today screen is open
+- UTC midnight rollover detected on `FOREGROUND_ENTER_EVENT` and on a 5-second timer while the Quest screen is open
+- `setBackgroundState` / `onBackgroundRestore` not yet exposed by the public SDK at 0.0.10 — background→foreground in-session falls back to the Quest screen; cold-restart state is preserved via `setLocalStorage`
 
 ## Tips
 
