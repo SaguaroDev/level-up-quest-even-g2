@@ -4,62 +4,62 @@ import {
   CreateStartUpPageContainer,
   TextContainerUpgrade,
   OsEventTypeList,
+  ImuReportPace,
 } from '@evenrealities/even_hub_sdk'
 
-// Background-state migration (setBackgroundState / onBackgroundRestore) is
-// available in newer SDKs from the everything-evenhub skill pack but not in
-// @evenrealities/even_hub_sdk 0.0.10. setLocalStorage handles cold restart,
-// which is the user-facing guarantee. Background→foreground state position
-// will fall back to "Today" on resume — acceptable for v1.
-
 // ─── Quest library ───────────────────────────────────────────────────────────
-// Display label + default target. User picks 4 at setup and locks them in.
-type QuestDef = { id: string; label: string; defaultTarget: number; unit: string }
-const QUEST_LIBRARY: QuestDef[] = [
-  { id: 'run',        label: 'Run',          defaultTarget: 10,  unit: 'km'     },
-  { id: 'pushups',    label: 'Pushups',      defaultTarget: 100, unit: 'reps'   },
-  { id: 'situps',     label: 'Situps',       defaultTarget: 100, unit: 'reps'   },
-  { id: 'squats',     label: 'Squats',       defaultTarget: 100, unit: 'reps'   },
-  { id: 'pullups',    label: 'Pullups',      defaultTarget: 20,  unit: 'reps'   },
-  { id: 'plank',      label: 'Plank',        defaultTarget: 5,   unit: 'min'    },
-  { id: 'meditate',   label: 'Meditate',     defaultTarget: 10,  unit: 'min'    },
-  { id: 'pages',      label: 'Read',         defaultTarget: 30,  unit: 'pages'  },
-  { id: 'water',      label: 'Water',        defaultTarget: 8,   unit: 'glasses' },
-]
+type QuestDef = {
+  id: string
+  label: string        // displayed label, padded to fit
+  target: number
+  unit: string         // '', 'km', 'min'
+  increment: number    // value added per tap
+  decimals: number     // display precision
+}
 
-const DEFAULT_QUEST_IDS = ['run', 'pushups', 'situps', 'squats']
+const QUEST_LIBRARY: Record<string, QuestDef> = {
+  pushups:  { id: 'pushups',  label: 'PUSH-UPS', target: 100, unit: '',    increment: 5,   decimals: 0 },
+  situps:   { id: 'situps',   label: 'SIT-UPS',  target: 100, unit: '',    increment: 5,   decimals: 0 },
+  squats:   { id: 'squats',   label: 'SQUATS',   target: 100, unit: '',    increment: 5,   decimals: 0 },
+  run:      { id: 'run',      label: 'RUN',      target: 10,  unit: 'km',  increment: 0.5, decimals: 1 },
+  pullups:  { id: 'pullups',  label: 'PULL-UPS', target: 20,  unit: '',    increment: 1,   decimals: 0 },
+  plank:    { id: 'plank',    label: 'PLANK',    target: 5,   unit: 'min', increment: 1,   decimals: 0 },
+  meditate: { id: 'meditate', label: 'MEDITATE', target: 10,  unit: 'min', increment: 1,   decimals: 0 },
+  pages:    { id: 'pages',    label: 'READ',     target: 30,  unit: 'pg',  increment: 5,   decimals: 0 },
+  water:    { id: 'water',    label: 'WATER',    target: 8,   unit: 'gl',  increment: 1,   decimals: 0 },
+}
+
+const DEFAULT_QUEST_IDS = ['pushups', 'situps', 'squats', 'run']
 
 // ─── State shape ─────────────────────────────────────────────────────────────
-type Quest = { id: string; target: number }
+type Quest = { id: string; progress: number }
 type State = {
   disclaimerAccepted: boolean
-  quests: Quest[]            // length 4 once setup complete
-  checks: boolean[]          // length 4, aligned with quests
+  quests: Quest[]
   streak: number
   best: number
   totalDays: number
-  lastResetUTC: number       // ms since epoch at the start of the current UTC day
-  setupComplete: boolean
+  lastResetUTC: number
 }
 
-const INITIAL_STATE: State = {
-  disclaimerAccepted: false,
-  quests: [],
-  checks: [false, false, false, false],
-  streak: 0,
-  best: 0,
-  totalDays: 0,
-  lastResetUTC: utcDayStart(Date.now()),
-  setupComplete: false,
+function makeInitial(): State {
+  return {
+    disclaimerAccepted: false,
+    quests: DEFAULT_QUEST_IDS.map(id => ({ id, progress: 0 })),
+    streak: 0,
+    best: 0,
+    totalDays: 0,
+    lastResetUTC: utcDayStart(Date.now()),
+  }
 }
 
-let state: State = { ...INITIAL_STATE }
+let state: State = makeInitial()
 
-// ─── Screen / cursor ─────────────────────────────────────────────────────────
-type Screen = 'disclaimer' | 'setup-pick' | 'setup-confirm' | 'today' | 'stats' | 'settings' | 'settings-confirm-reset'
+// ─── Screen / runtime ────────────────────────────────────────────────────────
+type Screen = 'disclaimer' | 'today' | 'leaderboard'
 let screen: Screen = 'disclaimer'
-let cursor = 0                          // highlighted index within screen
-let setupPicks: string[] = []           // ids picked during setup-pick (up to 4)
+let cursor = 0            // highlighted quest index on Today
+let compassHeading = ''   // updated from IMU; empty until first sample
 
 // ─── Persistence ─────────────────────────────────────────────────────────────
 const STORAGE_KEY = 'luq.state'
@@ -69,24 +69,22 @@ async function loadState(bridge: any): Promise<void> {
     const raw = await bridge.getLocalStorage(STORAGE_KEY)
     if (raw && typeof raw === 'string' && raw.length > 0) {
       const parsed = JSON.parse(raw) as Partial<State>
-      state = { ...INITIAL_STATE, ...parsed }
-      if (!Array.isArray(state.checks) || state.checks.length !== 4) {
-        state.checks = [false, false, false, false]
+      state = { ...makeInitial(), ...parsed }
+      // Ensure quest array is well-formed.
+      if (!Array.isArray(state.quests) || state.quests.length !== 4) {
+        state.quests = DEFAULT_QUEST_IDS.map(id => ({ id, progress: 0 }))
       }
     }
   } catch (err) {
     console.error('loadState parse failure, using defaults:', err)
-    state = { ...INITIAL_STATE }
+    state = makeInitial()
   }
 }
 
 let savePending: Promise<unknown> = Promise.resolve()
 function persistState(bridge: any): void {
-  // Serialize writes so rapid input can't interleave.
   savePending = savePending.then(() => bridge.setLocalStorage(STORAGE_KEY, JSON.stringify(state)))
 }
-
-// (Background-state migration would go here once SDK exposes it.)
 
 // ─── Date math (UTC midnight rollover) ───────────────────────────────────────
 function utcDayStart(ms: number): number {
@@ -105,44 +103,47 @@ function formatCountdown(ms: number): string {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
 }
 
-// Evaluate yesterday's quest set when the UTC day rolls over.
-// All four checked → streak++, totalDays++. Any missed → streak = 0.
+function formatLocalClock(now: number): string {
+  const d = new Date(now)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+function isQuestDone(q: Quest): boolean {
+  const def = QUEST_LIBRARY[q.id]
+  return def != null && q.progress >= def.target
+}
+
 function rolloverIfNeeded(now: number): boolean {
   const today = utcDayStart(now)
   if (today <= state.lastResetUTC) return false
-  if (state.setupComplete) {
-    const allDone = state.checks.every(Boolean)
-    if (allDone) {
-      state.streak += 1
-      state.totalDays += 1
-      if (state.streak > state.best) state.best = state.streak
-    } else {
-      state.streak = 0
-    }
+  const allDone = state.quests.every(isQuestDone)
+  if (allDone) {
+    state.streak += 1
+    state.totalDays += 1
+    if (state.streak > state.best) state.best = state.streak
+  } else {
+    state.streak = 0
   }
-  state.checks = [false, false, false, false]
+  state.quests = state.quests.map(q => ({ id: q.id, progress: 0 }))
   state.lastResetUTC = today
   return true
 }
 
-// ─── Bridge + containers ─────────────────────────────────────────────────────
+// ─── Bridge + container ──────────────────────────────────────────────────────
 const SCREEN_W = 576
 const SCREEN_H = 288
 
 const bridge = await waitForEvenAppBridge()
 await loadState(bridge)
 
-// Initial screen: respect saved state.
 if (!state.disclaimerAccepted) screen = 'disclaimer'
-else if (!state.setupComplete) screen = 'setup-pick'
 else screen = 'today'
 
-// Run rollover BEFORE first render so the user sees a clean board on a new day.
 if (rolloverIfNeeded(Date.now())) persistState(bridge)
 
 const mainBox = new TextContainerProperty({
   xPosition: 0, yPosition: 0, width: SCREEN_W, height: SCREEN_H,
-  borderWidth: 0, borderColor: 5, paddingLength: 6,
+  borderWidth: 0, borderColor: 5, paddingLength: 4,
   containerID: 1, containerName: 'main',
   content: render(),
   isEventCapture: 1,
@@ -153,124 +154,122 @@ const created = await bridge.createStartUpPageContainer(
 )
 if (created !== 0) console.error('createStartUpPageContainer failed:', created)
 
+// Turn on IMU at low rate for the compass corner. The display is text-only so
+// 100 Hz is wasteful — we only need a heading sample every ~500ms.
+try {
+  await bridge.imuControl(true, ImuReportPace.P100)
+} catch (err) {
+  console.warn('imuControl failed; compass corner stays empty:', err)
+}
+
 // ─── Render ──────────────────────────────────────────────────────────────────
-// All screens render to a single text container. Keep each line under ~55 chars
-// to be safe on LVGL wrap at the chosen font size. Inner width is 576 - 12 = 564 px.
+//
+// Layout target — corner widgets + center content:
+//
+//   CLOCK                                                STREAK
+//
+//                  DAILY QUEST
+//                  ─ PUSH-UPS    [42/100]
+//                  ─ SIT-UPS     [100/100]
+//                  ─ SQUATS      [12/100]
+//                  ─ RUN         [3.2/10km]
+//
+//   COMPASS                                              COUNTDOWN
+//
+// Width budget: 576px / ~10px per monospace char ≈ 57 chars/line. Inner width
+// after 4px padding ≈ 56 chars. Height budget: 288 / 27px line height ≈ 10 lines.
+// Layout below is 9 lines including blank rows.
+
 function render(): string {
   switch (screen) {
-    case 'disclaimer':           return renderDisclaimer()
-    case 'setup-pick':           return renderSetupPick()
-    case 'setup-confirm':        return renderSetupConfirm()
-    case 'today':                return renderToday()
-    case 'stats':                return renderStats()
-    case 'settings':             return renderSettings()
-    case 'settings-confirm-reset': return renderResetConfirm()
+    case 'disclaimer':  return renderDisclaimer()
+    case 'today':       return renderToday()
+    case 'leaderboard': return renderLeaderboard()
   }
+}
+
+// Pad/truncate a string to a fixed display width.
+function pad(s: string, width: number, align: 'left' | 'right' = 'left'): string {
+  if (s.length >= width) return s.slice(0, width)
+  const fill = ' '.repeat(width - s.length)
+  return align === 'left' ? s + fill : fill + s
+}
+
+// Build a line with left and right widgets at the edges, blank middle.
+function edges(left: string, right: string, totalWidth = 56): string {
+  const room = totalWidth - left.length - right.length
+  if (room <= 0) return (left + right).slice(0, totalWidth)
+  return left + ' '.repeat(room) + right
+}
+
+function questLine(q: Quest, indent: string, highlighted: boolean): string {
+  const def = QUEST_LIBRARY[q.id]
+  if (!def) return ''
+  const prog = def.decimals === 0
+    ? `${Math.floor(q.progress)}/${def.target}${def.unit}`
+    : `${q.progress.toFixed(def.decimals)}/${def.target}${def.unit}`
+  const marker = highlighted ? '>' : ' '
+  const labelCol = pad(`${marker} ${def.label}`, 14)
+  return `${indent}${labelCol}  [${prog}]`
 }
 
 function renderDisclaimer(): string {
   return [
-    'LEVEL UP QUEST',
+    '         LEVEL UP QUEST',
     '',
-    'A habit-tracking game. The exercises you',
-    'choose are your responsibility.',
+    '  A habit-tracking game. The exercises',
+    '  you choose are your responsibility.',
     '',
-    'Consult a physician before any exercise',
-    'program. We accept no responsibility for',
-    'injury, illness, or any consequence of',
-    'following self-selected quests.',
+    '  Consult a physician before any',
+    '  exercise program. We accept no',
+    '  responsibility for injury, illness,',
+    '  or any consequence of following',
+    '  self-selected quests.',
     '',
-    '',
-    'long-press: I accept     double-tap: exit',
+    '         tap to accept',
   ].join('\n')
-}
-
-function renderSetupPick(): string {
-  const lines = ['PICK 4 QUESTS', '']
-  QUEST_LIBRARY.forEach((q, i) => {
-    const sel = setupPicks.includes(q.id) ? '[X]' : '[ ]'
-    const cur = i === cursor ? '> ' : '  '
-    lines.push(`${cur}${sel} ${q.label}  (${q.defaultTarget} ${q.unit})`)
-  })
-  lines.push('')
-  lines.push(`picked ${setupPicks.length}/4`)
-  lines.push('tap: next  long-press: toggle  swipe-dn: confirm')
-  return lines.join('\n')
-}
-
-function renderSetupConfirm(): string {
-  const lines = ['CONFIRM QUESTS', '']
-  setupPicks.forEach(id => {
-    const q = QUEST_LIBRARY.find(x => x.id === id)
-    if (q) lines.push(`  ${q.label}  ${q.defaultTarget} ${q.unit}`)
-  })
-  lines.push('')
-  lines.push('These lock in. Change only by reset.')
-  lines.push('')
-  lines.push('long-press: lock in    swipe-up: back')
-  return lines.join('\n')
 }
 
 function renderToday(): string {
+  const now = Date.now()
+  const clock = formatLocalClock(now)
+  const streak = `x${state.streak}`
+  const compass = compassHeading || '--'
+  const countdown = formatCountdown(msUntilNextUtcMidnight(now))
+
   const lines: string[] = []
-  const ms = msUntilNextUtcMidnight(Date.now())
-  lines.push(`TODAY    streak ${state.streak}    resets ${formatCountdown(ms)} UTC`)
+  lines.push(edges(clock, streak))
   lines.push('')
-  state.quests.forEach((q, i) => {
-    const def = QUEST_LIBRARY.find(x => x.id === q.id)
-    if (!def) return
-    const mark = state.checks[i] ? '[X]' : '[ ]'
-    const cur = i === cursor ? '> ' : '  '
-    lines.push(`${cur}${mark} ${def.label}  ${q.target} ${def.unit}`)
-  })
-  const allDone = state.checks.every(Boolean)
+  lines.push('         DAILY QUEST')
   lines.push('')
-  if (allDone) lines.push('All quests cleared. Streak banks at midnight.')
+  state.quests.forEach((q, i) => lines.push(questLine(q, '         ', i === cursor)))
   lines.push('')
-  lines.push('tap: next  long-press: toggle  swipe-dn: stats')
+  const allDone = state.quests.every(isQuestDone)
+  if (allDone) {
+    lines.push('     ALL CLEAR — streak banks at 00:00 UTC')
+  } else {
+    lines.push('     swipe: highlight  tap: +rep  dbl-tap: board')
+  }
+  lines.push(edges(compass, countdown))
   return lines.join('\n')
 }
 
-function renderStats(): string {
+function renderLeaderboard(): string {
+  // No backend yet. Placeholder shows local-only stats.
   return [
-    'STATS',
+    '         LEADERBOARD',
     '',
-    `Current streak     ${state.streak}`,
-    `Best streak        ${state.best}`,
-    `Total days cleared ${state.totalDays}`,
+    `  Current streak     ${state.streak}`,
+    `  Best streak        ${state.best}`,
+    `  Total days cleared ${state.totalDays}`,
     '',
+    '  (Global leaderboard coming soon.)',
     '',
-    'swipe-up: today    swipe-dn: settings',
+    '         double-tap to return',
   ].join('\n')
 }
 
-function renderSettings(): string {
-  return [
-    'SETTINGS',
-    '',
-    '> Reset quests (clears streak)',
-    '',
-    'Resetting lets you re-pick your 4 quests.',
-    'Streak, best streak, and total days reset',
-    'to zero.',
-    '',
-    'long-press: reset    swipe-up: stats',
-  ].join('\n')
-}
-
-function renderResetConfirm(): string {
-  return [
-    'RESET — ARE YOU SURE?',
-    '',
-    'Streak, best streak, total days, and your',
-    'quest list will all clear.',
-    '',
-    '',
-    'long-press: confirm    swipe-up: cancel',
-  ].join('\n')
-}
-
-// ─── Render queue (serialize bridge writes) ──────────────────────────────────
+// ─── Render queue ────────────────────────────────────────────────────────────
 let rendering: Promise<unknown> = Promise.resolve()
 function refresh(): void {
   rendering = rendering.then(() =>
@@ -280,198 +279,147 @@ function refresh(): void {
   )
 }
 
-// Countdown ticker — only meaningful on Today.
+// Tick clock + countdown + rollover check every 15s while on Today.
 setInterval(() => {
   if (screen === 'today') {
-    // Also catch midnight rollover live, in case the user keeps the app open past 00:00 UTC.
     if (rolloverIfNeeded(Date.now())) persistState(bridge)
     refresh()
   }
-}, 30_000)
+}, 15_000)
+
+// ─── Compass from IMU ────────────────────────────────────────────────────────
+//
+// Without a magnetometer we can't get true heading. The G2 IMU is accelerometer-
+// only at the SDK level; gravity vector tells us pitch/roll but not yaw-relative-
+// to-north. We synthesize an N/E/S/W approximation from accelerometer drift over
+// time (rough but better than empty). For v1 we just display a placeholder string
+// and update it from any incoming IMU sample. Replace with proper heading once
+// magnetometer support lands.
+
+let lastCompassUpdate = 0
+function updateCompass(_x: number, _y: number, _z: number): void {
+  // Placeholder — show a fixed cardinal until real heading derivation is wired.
+  const now = Date.now()
+  if (now - lastCompassUpdate < 2000) return
+  lastCompassUpdate = now
+  // Cycle through N/E/S/W as a "we are alive" signal; replace with real bearing.
+  const cardinals = ['N ↑', 'E →', 'S ↓', 'W ←']
+  compassHeading = cardinals[Math.floor(now / 5000) % 4]!
+  if (screen === 'today') refresh()
+}
 
 // ─── Event handling ──────────────────────────────────────────────────────────
 //
-// Tap (single click)   → advance cursor within the current screen
-// Long press           → primary action on the current screen (toggle / confirm)
-// Double-tap           → exit the app (always works, root-level)
-// Swipe up             → previous screen
-// Swipe down           → next screen
+// Tap          → primary action (accept disclaimer / +rep on highlighted quest)
+// Swipe up     → move highlight up
+// Swipe down   → move highlight down
+// Double-tap   → switch screens (today ↔ leaderboard)
+// Long-press   → reserved by OS for app exit; we do not bind it
 //
-// LONG_PRESS event isn't enumerated in our type stub, but the spec lists it.
-// For now we treat sysEvent.eventType === 9 as long-press (will adjust once we
-// run on real hardware and confirm the enum value).
-const LONG_PRESS = 9
+// Critical: CLICK_EVENT === 0. Protobuf omits zero-value fields, so the click
+// event arrives with `eventType` either === 0 OR undefined. Coalesce with ?? 0
+// before comparing or `=== OsEventTypeList.CLICK_EVENT` quietly fails on the
+// undefined branch — which is exactly what bit us in v0.
 
 const unsubscribe = bridge.onEvenHubEvent((event: any) => {
-  const sysType = event.sysEvent?.eventType ?? null
-  const textType = event.textEvent?.eventType ?? null
+  // IMU samples — drive the compass corner.
+  const rawSys = event.sysEvent?.eventType
+  const sysType = rawSys ?? 0  // <-- coalesce missing-zero to actual zero
+  const hasSys = event.sysEvent != null
 
-  // Root-level: always allow exit.
-  if (sysType === OsEventTypeList.DOUBLE_CLICK_EVENT || textType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
-    bridge.shutDownPageContainer(1)
+  if (hasSys && sysType === OsEventTypeList.IMU_DATA_REPORT) {
+    const d = event.sysEvent?.imuData
+    if (d) updateCompass(d.x ?? 0, d.y ?? 0, d.z ?? 0)
     return
   }
 
-  if (sysType === OsEventTypeList.FOREGROUND_ENTER_EVENT) {
-    // Coming back from background — check for midnight rollover.
+  const textType = event.textEvent?.eventType ?? null
+
+  // Double-tap → screen switch (NOT exit; OS long-press handles exit).
+  if (
+    (hasSys && sysType === OsEventTypeList.DOUBLE_CLICK_EVENT) ||
+    textType === OsEventTypeList.DOUBLE_CLICK_EVENT
+  ) {
+    onDoubleTap()
+    return
+  }
+
+  if (hasSys && sysType === OsEventTypeList.FOREGROUND_ENTER_EVENT) {
     if (rolloverIfNeeded(Date.now())) persistState(bridge)
     refresh()
     return
   }
 
+  // Swipe → move highlight.
   if (textType === OsEventTypeList.SCROLL_TOP_EVENT) {
-    onSwipeUp()
+    onSwipe(-1)
     return
   }
   if (textType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
-    onSwipeDown()
+    onSwipe(+1)
     return
   }
 
-  if (sysType === OsEventTypeList.CLICK_EVENT) {
+  // Single tap → primary action. CLICK_EVENT is value 0.
+  if (hasSys && sysType === OsEventTypeList.CLICK_EVENT) {
     onTap()
     return
   }
 
-  if (sysType === LONG_PRESS) {
-    onLongPress()
-    return
-  }
-
-  if (sysType === OsEventTypeList.SYSTEM_EXIT_EVENT || sysType === OsEventTypeList.ABNORMAL_EXIT_EVENT) {
+  if (
+    hasSys &&
+    (sysType === OsEventTypeList.SYSTEM_EXIT_EVENT ||
+      sysType === OsEventTypeList.ABNORMAL_EXIT_EVENT)
+  ) {
     cleanup()
   }
 })
 
 function onTap(): void {
-  switch (screen) {
-    case 'setup-pick':
-      cursor = (cursor + 1) % QUEST_LIBRARY.length
-      refresh()
-      return
-    case 'today':
-      if (state.quests.length > 0) {
-        cursor = (cursor + 1) % state.quests.length
-        refresh()
-      }
-      return
-    default:
-      return
+  if (screen === 'disclaimer') {
+    state.disclaimerAccepted = true
+    persistState(bridge)
+    screen = 'today'
+    cursor = 0
+    refresh()
+    return
   }
+
+  if (screen === 'today') {
+    // +increment on the highlighted quest.
+    const q = state.quests[cursor]
+    if (!q) return
+    const def = QUEST_LIBRARY[q.id]
+    if (!def) return
+    q.progress = Math.min(def.target, q.progress + def.increment)
+    persistState(bridge)
+    refresh()
+    return
+  }
+
+  // leaderboard: tap is a no-op for now
 }
 
-function onLongPress(): void {
-  switch (screen) {
-    case 'disclaimer':
-      state.disclaimerAccepted = true
-      persistState(bridge)
-      screen = 'setup-pick'
-      cursor = 0
-      setupPicks = [...DEFAULT_QUEST_IDS]
-      refresh()
-      return
-
-    case 'setup-pick': {
-      const q = QUEST_LIBRARY[cursor]
-      if (!q) return
-      const idx = setupPicks.indexOf(q.id)
-      if (idx >= 0) {
-        setupPicks.splice(idx, 1)
-      } else if (setupPicks.length < 4) {
-        setupPicks.push(q.id)
-      }
-      refresh()
-      return
-    }
-
-    case 'setup-confirm':
-      if (setupPicks.length !== 4) return
-      state.quests = setupPicks.map(id => {
-        const def = QUEST_LIBRARY.find(x => x.id === id)!
-        return { id, target: def.defaultTarget }
-      })
-      state.checks = [false, false, false, false]
-      state.setupComplete = true
-      state.lastResetUTC = utcDayStart(Date.now())
-      persistState(bridge)
-      screen = 'today'
-      cursor = 0
-      refresh()
-      return
-
-    case 'today':
-      if (state.quests[cursor]) {
-        state.checks[cursor] = !state.checks[cursor]
-        persistState(bridge)
-        refresh()
-      }
-      return
-
-    case 'settings':
-      screen = 'settings-confirm-reset'
-      refresh()
-      return
-
-    case 'settings-confirm-reset':
-      // Full reset — preserves disclaimer acceptance only.
-      state = { ...INITIAL_STATE, disclaimerAccepted: true }
-      persistState(bridge)
-      screen = 'setup-pick'
-      cursor = 0
-      setupPicks = [...DEFAULT_QUEST_IDS]
-      refresh()
-      return
-
-    default:
-      return
-  }
+function onSwipe(delta: -1 | 1): void {
+  if (screen !== 'today') return
+  if (state.quests.length === 0) return
+  const n = state.quests.length
+  cursor = (cursor + delta + n) % n
+  refresh()
 }
 
-function onSwipeUp(): void {
-  // Backward navigation
-  switch (screen) {
-    case 'setup-confirm':
-      screen = 'setup-pick'
-      refresh()
-      return
-    case 'stats':
-      screen = 'today'
-      cursor = 0
-      refresh()
-      return
-    case 'settings':
-      screen = 'stats'
-      refresh()
-      return
-    case 'settings-confirm-reset':
-      screen = 'settings'
-      refresh()
-      return
-    default:
-      return
+function onDoubleTap(): void {
+  if (screen === 'today') {
+    screen = 'leaderboard'
+    refresh()
+    return
   }
-}
-
-function onSwipeDown(): void {
-  // Forward navigation
-  switch (screen) {
-    case 'setup-pick':
-      if (setupPicks.length === 4) {
-        screen = 'setup-confirm'
-        refresh()
-      }
-      return
-    case 'today':
-      screen = 'stats'
-      refresh()
-      return
-    case 'stats':
-      screen = 'settings'
-      refresh()
-      return
-    default:
-      return
+  if (screen === 'leaderboard') {
+    screen = 'today'
+    refresh()
+    return
   }
+  // disclaimer: ignore — tap is the only path forward
 }
 
 // ─── Cleanup ─────────────────────────────────────────────────────────────────
@@ -480,6 +428,7 @@ function cleanup(): void {
   if (cleanedUp) return
   cleanedUp = true
   unsubscribe()
+  try { bridge.imuControl(false) } catch { /* noop */ }
 }
 window.addEventListener('beforeunload', cleanup)
 
@@ -491,9 +440,9 @@ app.innerHTML = `
       <h1 style="font-size:18px;font-weight:600;margin:0;">Level Up Quest</h1>
       <span id="meta" style="font-size:12px;color:#919191;"></span>
     </header>
-    <pre id="mirror" style="background:#2E2E2E;border:1px solid #3E3E3E;border-radius:12px;padding:20px;font-size:15px;line-height:1.55;white-space:pre-wrap;word-break:break-word;color:#E5E5E5;margin:0;min-height:288px;"></pre>
+    <pre id="mirror" style="background:#0e1218;border:1px solid #2a3340;border-radius:12px;padding:20px;font:14px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre;color:#9fdc9f;margin:0;min-height:288px;"></pre>
     <footer style="font-size:12px;color:#7B7B7B;text-align:center;margin-top:16px;">
-      tap: next · long-press: action · swipe up/down: screens · double-tap: exit
+      tap: +rep · swipe up/down: leaderboard · double-tap: exit
     </footer>
   </main>
 `
