@@ -5,28 +5,30 @@ import {
   TextContainerUpgrade,
   OsEventTypeList,
 } from '@evenrealities/even_hub_sdk'
+import { getTextWidth } from '@evenrealities/pretext'
 
 // ─── Solo Leveling Hunter System ─────────────────────────────────────────────
 //
-// One repeating Daily Quest set, dictated by the System (canon — the Hunter does
-// not pick their quests). Tap on a goal adds an increment of progress. Clear all
-// four before UTC midnight to gain EXP and grow your streak. Miss and the System
-// imposes a Penalty — streak resets and a Penalty Zone screen greets you next.
+// One repeating Daily Quest set, dictated by the System (canon). Tap on a goal
+// adds an increment of progress. Clear all four before UTC midnight to bank a
+// streak day. Miss and the System imposes a Penalty — streak resets and a
+// Penalty Zone screen greets you next.
 //
 // Ranks: E → D → C → B → A → S, gated by streak length.
-// Display: 576 × 288 monochrome green, ~56 chars wide × ~10 lines tall.
 //
+// Layout: 576×288 monochrome green, proportional font. Right-aligned values
+// (countdown, progress) live in their own pixel-positioned containers because
+// LVGL has no textAlign property — single-container char padding drifts.
 
 type QuestDef = {
   id: string
   label: string
   target: number
   unit: string         // '', 'KM', 'MIN'
-  increment: number    // value added per tap
-  decimals: number     // display precision
+  increment: number
+  decimals: number
 }
 
-// Solo Leveling canonical quest set. Same four every day. The System decides.
 const QUESTS: QuestDef[] = [
   { id: 'pushups', label: 'PUSH-UPS', target: 100, unit: '',   increment: 5,   decimals: 0 },
   { id: 'situps',  label: 'SIT-UPS',  target: 100, unit: '',   increment: 5,   decimals: 0 },
@@ -56,17 +58,16 @@ function nextRankThreshold(streak: number): number | null {
   for (const tier of RANKS) {
     if (streak < tier.threshold) return tier.threshold
   }
-  return null  // already S-rank
+  return null
 }
 
-// EXP awarded per completed daily. Compounding bonus past day 7 to reward streaks.
 function expForCompletion(streakAfter: number): number {
   const base = 100
   const bonus = Math.max(0, streakAfter - 7) * 10
   return base + bonus
 }
 
-const EXP_PER_LEVEL = 1000  // simple linear curve
+const EXP_PER_LEVEL = 1000
 
 function levelFromExp(totalExp: number): { level: number; expInLevel: number } {
   const level = Math.floor(totalExp / EXP_PER_LEVEL) + 1
@@ -84,9 +85,8 @@ type State = {
   totalDays: number
   totalExp: number
   lastResetUTC: number
-  pendingPenalty: boolean   // show penalty banner once on next foreground
-  pendingClear: boolean     // show "QUEST COMPLETE" banner once
-  lastShownRank: string     // for rank-up detection
+  pendingPenalty: boolean
+  pendingClear: boolean
 }
 
 function makeInitial(): State {
@@ -100,7 +100,6 @@ function makeInitial(): State {
     lastResetUTC: utcDayStart(Date.now()),
     pendingPenalty: false,
     pendingClear: false,
-    lastShownRank: 'E',
   }
 }
 
@@ -115,12 +114,11 @@ async function loadState(bridge: any): Promise<void> {
     if (raw && typeof raw === 'string' && raw.length > 0) {
       const parsed = JSON.parse(raw) as Partial<State>
       state = { ...makeInitial(), ...parsed }
-      // Re-bind quest order to canonical set; preserve progress where ids match.
       const byId = new Map((parsed.quests ?? []).map(q => [q.id, q.progress] as const))
       state.quests = QUESTS.map(def => ({ id: def.id, progress: byId.get(def.id) ?? 0 }))
     }
   } catch (err) {
-    console.error('loadState parse failure, using defaults:', err)
+    console.error('loadState parse failure:', err)
     state = makeInitial()
   }
 }
@@ -162,7 +160,6 @@ function allDone(): boolean {
   return state.quests.every(isQuestDone)
 }
 
-// Rollover at UTC midnight. Grades the previous day and starts a new one.
 function rolloverIfNeeded(now: number): boolean {
   const today = utcDayStart(now)
   if (today <= state.lastResetUTC) return false
@@ -174,52 +171,12 @@ function rolloverIfNeeded(now: number): boolean {
     state.totalExp += expForCompletion(state.streak)
     if (state.streak > state.best) state.best = state.streak
   } else {
-    // Penalty Zone — but only meaningful if you had a streak going.
     if (state.streak >= 1) state.pendingPenalty = true
     state.streak = 0
   }
   state.quests = QUESTS.map(def => ({ id: def.id, progress: 0 }))
   state.lastResetUTC = today
   return true
-}
-
-// ─── Screens ─────────────────────────────────────────────────────────────────
-type Screen =
-  | 'disclaimer'
-  | 'quest'
-  | 'status'
-  | 'penalty'
-  | 'clear'   // QUEST COMPLETE celebration
-
-let screen: Screen = 'quest'
-let cursor = 0  // highlighted quest index
-
-// ─── Render helpers ──────────────────────────────────────────────────────────
-const COLS = 56  // chars per line at 4px padding
-
-function center(s: string, width = COLS): string {
-  if (s.length >= width) return s.slice(0, width)
-  const left = Math.floor((width - s.length) / 2)
-  return ' '.repeat(left) + s
-}
-
-function pad(s: string, width: number, align: 'left' | 'right' = 'left'): string {
-  if (s.length >= width) return s.slice(0, width)
-  const fill = ' '.repeat(width - s.length)
-  return align === 'left' ? s + fill : fill + s
-}
-
-// ASCII frame — G2 LVGL font lacks Unicode box-drawing glyphs (verified on
-// hardware: the double-pipe chars render as blanks/rectangles). Stick to
-// plain ASCII so the frame survives the on-device renderer.
-const FRAME_TOP    = '+' + '-'.repeat(COLS - 2) + '+'
-const FRAME_MID    = '+' + '-'.repeat(COLS - 2) + '+'
-const FRAME_BOT    = '+' + '-'.repeat(COLS - 2) + '+'
-
-function framed(line: string): string {
-  // Trim/pad inner content to COLS - 2.
-  const inner = pad(line, COLS - 2)
-  return `|${inner}|`
 }
 
 function progressLabel(q: QuestState): string {
@@ -230,19 +187,72 @@ function progressLabel(q: QuestState): string {
   return `${cur}/${def.target}${def.unit}`
 }
 
-// ─── Render ──────────────────────────────────────────────────────────────────
-function render(): string {
+// ─── Screen state ────────────────────────────────────────────────────────────
+type Screen =
+  | 'disclaimer'
+  | 'quest'
+  | 'status'
+  | 'penalty'
+  | 'clear'
+
+let screen: Screen = 'quest'
+let cursor = 0
+
+// ─── Layout geometry ─────────────────────────────────────────────────────────
+const SCREEN_W = 576
+const SCREEN_H = 288
+const PAD = 4               // container internal padding
+const LINE_H = 27           // LVGL line height
+const RIGHT_EDGE = SCREEN_W - PAD   // right pixel edge (reserved for future use)
+void RIGHT_EDGE
+const COLS = 56             // chars per line for the LEFT background container
+
+// ─── Container IDs ───────────────────────────────────────────────────────────
+const CID_LEFT       = 1   // background frame + left-aligned content
+const CID_RIGHT_HEAD = 2   // header-right countdown
+const CID_RIGHT_Q1   = 3   // progress for quest 1
+const CID_RIGHT_Q2   = 4
+const CID_RIGHT_Q3   = 5
+const CID_RIGHT_Q4   = 6
+const CID_RIGHT_EXP  = 7   // status screen: exp number
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function pad(s: string, width: number, align: 'left' | 'right' = 'left'): string {
+  if (s.length >= width) return s.slice(0, width)
+  const fill = ' '.repeat(width - s.length)
+  return align === 'left' ? s + fill : fill + s
+}
+
+function center(s: string, width = COLS): string {
+  if (s.length >= width) return s.slice(0, width)
+  const left = Math.floor((width - s.length) / 2)
+  return ' '.repeat(left) + s
+}
+
+const FRAME_LINE = '+' + '-'.repeat(COLS - 2) + '+'
+function framed(line: string): string {
+  return `|${pad(line, COLS - 2)}|`
+}
+
+// ─── LEFT container content (the bulk of the layout) ─────────────────────────
+//
+// Right-edge VALUES are NOT in this content — they go in their own pixel-aligned
+// containers. To keep the right frame bar `|` aligned, the LEFT container draws
+// the FRAME (with the right `|` bar at column COLS-1) and reserves blank space
+// where the right-aligned values will overlay.
+
+function renderLeft(): string {
   switch (screen) {
-    case 'disclaimer': return renderDisclaimer()
-    case 'quest':      return renderQuest()
-    case 'status':     return renderStatus()
-    case 'penalty':    return renderPenalty()
-    case 'clear':      return renderClear()
+    case 'disclaimer': return renderLeftDisclaimer()
+    case 'quest':      return renderLeftQuest()
+    case 'status':     return renderLeftStatus()
+    case 'penalty':    return renderLeftPenalty()
+    case 'clear':      return renderLeftClear()
   }
 }
 
-function renderDisclaimer(): string {
-  const body = [
+function renderLeftDisclaimer(): string {
+  return [
     '',
     center('[!]  LEVEL UP QUEST  [!]'),
     '',
@@ -254,145 +264,292 @@ function renderDisclaimer(): string {
     center('no responsibility for injury or illness.'),
     '',
     center('-- tap to accept --'),
-  ]
-  return body.join('\n')
+  ].join('\n')
 }
 
-function renderQuest(): string {
-  const now = Date.now()
-  const countdown = formatCountdown(msUntilNextUtcMidnight(now))
-  const cleared = allDone()
+function renderLeftQuest(): string {
+  // Header strip: left side only. Right side (countdown) is its own container.
   const rank = rankFor(state.streak)
-
-  // Header strip: rank/streak left, countdown right.
-  const headerLeft  = `RANK ${rank}  STREAK ${state.streak}`
-  const headerRight = `[${countdown}]`
-  const headerRoom  = COLS - headerLeft.length - headerRight.length
-  const header = headerLeft + ' '.repeat(Math.max(1, headerRoom)) + headerRight
+  const headerLeft = `RANK ${rank}   STREAK ${state.streak}`
 
   const lines: string[] = []
-  lines.push(header)
-  lines.push(FRAME_TOP)
+  lines.push(headerLeft)
+  lines.push(FRAME_LINE)
   lines.push(framed('  [!] QUEST INFO - DAILY QUEST'))
   lines.push(framed('  TRAIN TO BECOME A FORMIDABLE COMBATANT'))
-  lines.push(FRAME_MID)
+  lines.push(FRAME_LINE)
 
   state.quests.forEach((q, i) => {
     const done = isQuestDone(q)
     const marker = i === cursor ? '>' : ' '
     const def = QUESTS.find(d => d.id === q.id)!
     const check = done ? '[x]' : '[ ]'
-    const labelCol = pad(`${marker} ${check} ${def.label}`, 20)
-    const prog = `[${progressLabel(q)}]`
-    const room = (COLS - 2) - labelCol.length - prog.length
-    const inner = labelCol + ' '.repeat(Math.max(1, room)) + prog
-    lines.push(`║${inner}║`)
+    // Just the LABEL side — progress value is its own right-aligned container.
+    // Reserve the right portion with blank pad so the closing `|` lines up.
+    lines.push(framed(`${marker} ${check} ${def.label}`))
   })
 
-  lines.push(FRAME_BOT)
-  if (cleared) {
+  lines.push(FRAME_LINE)
+  if (allDone()) {
     lines.push(center('-- ALL CLEAR - banks at 00:00 UTC --'))
   }
   return lines.join('\n')
 }
 
-function renderStatus(): string {
+function renderLeftStatus(): string {
   const { level, expInLevel } = levelFromExp(state.totalExp)
   const rank = rankFor(state.streak)
   const nextRank = nextRankThreshold(state.streak)
   const toNextRank = nextRank == null ? '-- MAX --' : `${nextRank - state.streak} day(s)`
 
-  // EXP bar — 30 cells wide. ASCII chars only (G2 font lacks block glyphs).
   const barCells = 30
   const filled = Math.round((expInLevel / EXP_PER_LEVEL) * barCells)
   const bar = '#'.repeat(filled) + '.'.repeat(barCells - filled)
 
   const lines: string[] = []
-  lines.push(FRAME_TOP)
+  lines.push(FRAME_LINE)
   lines.push(framed('  [!]  STATUS'))
-  lines.push(FRAME_MID)
+  lines.push(FRAME_LINE)
   lines.push(framed(`  HUNTER       LVL ${level}   RANK ${rank}`))
-  lines.push(framed(`  EXP   ${bar} ${pad(String(expInLevel), 4, 'right')}`))
+  // EXP number is its own right-aligned container.
+  lines.push(framed(`  EXP   ${bar}`))
   lines.push(framed(`  STREAK       ${state.streak}   BEST ${state.best}`))
   lines.push(framed(`  TOTAL DAYS   ${state.totalDays}`))
   lines.push(framed(`  NEXT RANK    ${toNextRank}`))
-  lines.push(FRAME_BOT)
+  lines.push(FRAME_LINE)
   lines.push(center('-- double-tap to return --'))
   return lines.join('\n')
 }
 
-function renderPenalty(): string {
+function renderLeftPenalty(): string {
   return [
-    FRAME_TOP,
+    FRAME_LINE,
     framed('  [!]  PENALTY ZONE'),
-    FRAME_MID,
+    FRAME_LINE,
     framed('  THE DAILY QUEST REMAINED INCOMPLETE.'),
     framed(''),
     framed('  PENALTIES HAVE BEEN GIVEN'),
     framed('  ACCORDINGLY. STREAK RESET.'),
-    FRAME_BOT,
+    FRAME_LINE,
     center('-- tap to continue --'),
   ].join('\n')
 }
 
-function renderClear(): string {
+function renderLeftClear(): string {
   const { level } = levelFromExp(state.totalExp)
   const rank = rankFor(state.streak)
   return [
-    FRAME_TOP,
+    FRAME_LINE,
     framed('  [!]  QUEST COMPLETE'),
-    FRAME_MID,
+    FRAME_LINE,
     framed('  ALL GOALS CLEARED.'),
     framed(''),
     framed(`  STREAK   x${state.streak}    RANK   ${rank}`),
     framed(`  LEVEL    ${level}`),
-    FRAME_BOT,
+    FRAME_LINE,
     center('-- tap to continue --'),
   ].join('\n')
 }
 
-// ─── Bridge + container ──────────────────────────────────────────────────────
-const SCREEN_W = 576
-const SCREEN_H = 288
+// ─── Right-anchored value containers ─────────────────────────────────────────
+//
+// Each right-aligned value lives in its own container, positioned at
+// x = RIGHT_EDGE - getTextWidth(value). The container width is just wide enough
+// for the value, and the content is its only line — so the result is pixel-
+// perfect right-alignment regardless of digit count.
+//
+// We also have to LEAVE ROOM for the frame's right `|` bar — so we anchor to
+// (RIGHT_EDGE - frameBarWidth - 2). For the LEFT container, the frame `|`
+// already occupies column COLS-1.
 
+// We pre-create containers for every right-value we might ever need (max 4
+// quest rows + 1 header + 1 status-exp = 6 right containers). On screen change
+// we set unused containers to empty string.
+
+type RightValue = {
+  cid: number
+  text: string       // value to display ('' = hidden)
+  yPosition: number  // top edge in px
+}
+
+// Approximate y positions (top of each row) for the Quest screen:
+//   row 0 (header):   y=0
+//   row 1 (frame):    y=27
+//   row 2 (info):     y=54
+//   row 3 (info):     y=81
+//   row 4 (frame):    y=108
+//   row 5 (q1):       y=135
+//   row 6 (q2):       y=162
+//   row 7 (q3):       y=189
+//   row 8 (q4):       y=216
+//   row 9 (frame):    y=243
+//   row 10 (clear):   y=270
+//
+// For status screen, EXP value sits on row index 5 (HUNTER LVL+RANK is row 4,
+// EXP is row 5).
+
+const Y_HEADER = 0
+const Y_Q_BASE = 5 * LINE_H   // first quest row
+const Y_EXP = 5 * LINE_H
+
+function rightValuesForScreen(): RightValue[] {
+  if (screen === 'quest') {
+    const countdown = `[${formatCountdown(msUntilNextUtcMidnight(Date.now()))}]`
+    const out: RightValue[] = [
+      { cid: CID_RIGHT_HEAD, text: countdown, yPosition: Y_HEADER },
+    ]
+    state.quests.forEach((q, i) => {
+      const cid = [CID_RIGHT_Q1, CID_RIGHT_Q2, CID_RIGHT_Q3, CID_RIGHT_Q4][i]!
+      out.push({ cid, text: `[${progressLabel(q)}]`, yPosition: Y_Q_BASE + i * LINE_H })
+    })
+    out.push({ cid: CID_RIGHT_EXP, text: '', yPosition: Y_EXP })
+    return out
+  }
+
+  if (screen === 'status') {
+    const { expInLevel } = levelFromExp(state.totalExp)
+    return [
+      { cid: CID_RIGHT_HEAD, text: '', yPosition: Y_HEADER },
+      { cid: CID_RIGHT_Q1,   text: '', yPosition: Y_Q_BASE },
+      { cid: CID_RIGHT_Q2,   text: '', yPosition: Y_Q_BASE + LINE_H },
+      { cid: CID_RIGHT_Q3,   text: '', yPosition: Y_Q_BASE + 2 * LINE_H },
+      { cid: CID_RIGHT_Q4,   text: '', yPosition: Y_Q_BASE + 3 * LINE_H },
+      { cid: CID_RIGHT_EXP,  text: String(expInLevel), yPosition: Y_EXP },
+    ]
+  }
+
+  // disclaimer, penalty, clear — hide every right value.
+  return [
+    { cid: CID_RIGHT_HEAD, text: '', yPosition: Y_HEADER },
+    { cid: CID_RIGHT_Q1,   text: '', yPosition: Y_Q_BASE },
+    { cid: CID_RIGHT_Q2,   text: '', yPosition: Y_Q_BASE + LINE_H },
+    { cid: CID_RIGHT_Q3,   text: '', yPosition: Y_Q_BASE + 2 * LINE_H },
+    { cid: CID_RIGHT_Q4,   text: '', yPosition: Y_Q_BASE + 3 * LINE_H },
+    { cid: CID_RIGHT_EXP,  text: '', yPosition: Y_EXP },
+  ]
+}
+
+// Approximate text width when the SDK's pretext isn't available (rare edge).
+function approxWidth(s: string): number {
+  // Fall back to ~10px per char. Will look off but at least visible.
+  return s.length * 10
+}
+
+function measureWidth(s: string): number {
+  if (!s) return 0
+  try {
+    return getTextWidth(s)
+  } catch {
+    return approxWidth(s)
+  }
+}
+
+// ─── Bridge boot ─────────────────────────────────────────────────────────────
 const bridge = await waitForEvenAppBridge()
 await loadState(bridge)
 
-// Decide initial screen.
 if (!state.disclaimerAccepted) {
   screen = 'disclaimer'
 } else {
   if (rolloverIfNeeded(Date.now())) persistState(bridge)
-  if (state.pendingPenalty) {
-    screen = 'penalty'
-  } else if (state.pendingClear) {
-    screen = 'clear'
-  } else {
-    screen = 'quest'
-  }
+  if (state.pendingPenalty) screen = 'penalty'
+  else if (state.pendingClear) screen = 'clear'
+  else screen = 'quest'
 }
 
-const mainBox = new TextContainerProperty({
+// Reserve room on the right for the value containers; the LEFT container still
+// spans the full screen so the frame's `|` bar lives at column COLS-1.
+const leftContainer = new TextContainerProperty({
   xPosition: 0, yPosition: 0, width: SCREEN_W, height: SCREEN_H,
-  borderWidth: 0, borderColor: 5, paddingLength: 4,
-  containerID: 1, containerName: 'main',
-  content: render(),
+  borderWidth: 0, borderColor: 5, paddingLength: PAD,
+  containerID: CID_LEFT, containerName: 'left',
+  content: renderLeft(),
   isEventCapture: 1,
 })
 
+// Right containers are created with placeholder widths; we resize implicitly by
+// changing xPosition via... wait, container geometry is set at create-time and
+// not re-settable from textContainerUpgrade. Strategy: make each right container
+// FIXED WIDTH (just wide enough for the widest expected value) and update its
+// CONTENT padded on the LEFT with spaces so the visible end of the text sits
+// at the same right pixel. Spaces in a left-aligned container push content
+// rightward by a known pixel amount per space.
+//
+// We use pretext.getTextWidth to compute, per update, how many leading spaces
+// the value needs to right-align inside the container's fixed inner width.
+
+const RIGHT_INNER_W = 110   // max pixel budget for a right-aligned value (12 chars * ~9px)
+const RIGHT_OUTER_W = RIGHT_INNER_W + 2 * PAD
+// Anchor right edge of these containers to the screen's right edge minus the
+// LEFT container's frame `|` bar (~9 px) and a small gutter.
+const RIGHT_GUTTER = 12  // space for `|` frame bar + margin
+const RIGHT_X = SCREEN_W - RIGHT_OUTER_W - RIGHT_GUTTER
+
+function makeRightContainer(cid: number, y: number, name: string): TextContainerProperty {
+  return new TextContainerProperty({
+    xPosition: RIGHT_X, yPosition: y,
+    width: RIGHT_OUTER_W, height: LINE_H,
+    borderWidth: 0, borderColor: 0, paddingLength: PAD,
+    containerID: cid, containerName: name,
+    content: '',
+    isEventCapture: 0,
+  })
+}
+
+const initialRightValues = rightValuesForScreen()
+const rightContainers = initialRightValues.map(rv =>
+  makeRightContainer(rv.cid, rv.yPosition, `r${rv.cid}`)
+)
+
+// Right-align a value within RIGHT_INNER_W by prepending the right number of
+// leading spaces. measureWidth(' ') gives us per-space cost.
+const SPACE_W = Math.max(1, measureWidth(' ') || 5)
+function rightAlignedContent(value: string): string {
+  if (!value) return ''
+  const valueW = measureWidth(value)
+  const gap = RIGHT_INNER_W - valueW
+  if (gap <= 0) return value
+  const spaces = Math.max(0, Math.floor(gap / SPACE_W))
+  return ' '.repeat(spaces) + value
+}
+
+// Populate right containers with their initial values.
+initialRightValues.forEach((rv, i) => {
+  rightContainers[i]!.content = rightAlignedContent(rv.text)
+})
+
 const created = await bridge.createStartUpPageContainer(
-  new CreateStartUpPageContainer({ containerTotalNum: 1, textObject: [mainBox] }),
+  new CreateStartUpPageContainer({
+    containerTotalNum: 1 + rightContainers.length,
+    textObject: [leftContainer, ...rightContainers],
+  }),
 )
 if (created !== 0) console.error('createStartUpPageContainer failed:', created)
 
-// ─── Render queue (LVGL crashes on parallel upgrades) ────────────────────────
+// ─── Render queue ────────────────────────────────────────────────────────────
 let rendering: Promise<unknown> = Promise.resolve()
+
 function refresh(): void {
-  rendering = rendering.then(() =>
-    bridge.textContainerUpgrade(
-      new TextContainerUpgrade({ containerID: 1, containerName: 'main', content: render() }),
-    ),
-  )
+  rendering = rendering.then(async () => {
+    // Update LEFT first so the frame is in place before values appear.
+    await bridge.textContainerUpgrade(
+      new TextContainerUpgrade({
+        containerID: CID_LEFT,
+        containerName: 'left',
+        content: renderLeft(),
+      }),
+    )
+    // Then each right-aligned value in sequence.
+    for (const rv of rightValuesForScreen()) {
+      await bridge.textContainerUpgrade(
+        new TextContainerUpgrade({
+          containerID: rv.cid,
+          containerName: `r${rv.cid}`,
+          content: rightAlignedContent(rv.text),
+        }),
+      )
+    }
+  })
 }
 
 // Tick countdown + rollover check every 5s while on quest screen.
@@ -400,7 +557,6 @@ setInterval(() => {
   if (screen === 'quest') {
     if (rolloverIfNeeded(Date.now())) {
       persistState(bridge)
-      // Bump to penalty/clear screen on rollover with consequences.
       if (state.pendingPenalty) screen = 'penalty'
     }
     refresh()
@@ -414,7 +570,6 @@ const unsubscribe = bridge.onEvenHubEvent((event: any) => {
   const hasSys = event.sysEvent != null
   const textType = event.textEvent?.eventType ?? null
 
-  // Foreground entry: re-grade in case the phone slept past midnight UTC.
   if (hasSys && sysType === OsEventTypeList.FOREGROUND_ENTER_EVENT) {
     if (rolloverIfNeeded(Date.now())) persistState(bridge)
     if (state.pendingPenalty) screen = 'penalty'
@@ -422,8 +577,6 @@ const unsubscribe = bridge.onEvenHubEvent((event: any) => {
     return
   }
 
-  // Double-tap: cycle quest ↔ status (never exit the app this way — Solo
-  // Leveling's System doesn't let you walk away).
   if (
     (hasSys && sysType === OsEventTypeList.DOUBLE_CLICK_EVENT) ||
     textType === OsEventTypeList.DOUBLE_CLICK_EVENT
@@ -484,9 +637,6 @@ function onTap(): void {
     q.progress = Math.min(def.target, q.progress + def.increment)
     persistState(bridge)
     if (!wasAllDone && allDone()) {
-      // Just sealed the daily — flash a celebration but DON'T bank streak yet;
-      // streak banks at UTC midnight rollover. Show the panel as immediate
-      // feedback, then return to quest screen for the rest of the day.
       state.pendingClear = true
       persistState(bridge)
       screen = 'clear'
@@ -494,8 +644,6 @@ function onTap(): void {
     refresh()
     return
   }
-
-  // status: tap is a no-op
 }
 
 function onSwipe(delta: -1 | 1): void {
@@ -508,7 +656,6 @@ function onSwipe(delta: -1 | 1): void {
 function onDoubleTap(): void {
   if (screen === 'quest')  { screen = 'status'; refresh(); return }
   if (screen === 'status') { screen = 'quest';  refresh(); return }
-  // disclaimer / penalty / clear ignore double-tap — single path forward.
 }
 
 // ─── Cleanup ─────────────────────────────────────────────────────────────────
@@ -521,6 +668,10 @@ function cleanup(): void {
 window.addEventListener('beforeunload', cleanup)
 
 // ─── Browser companion mirror ────────────────────────────────────────────────
+//
+// The browser companion uses a monospace font, so it'll show alignment
+// differently from the glasses. Keep it for state debugging, not visual fidelity.
+
 const app = document.querySelector<HTMLDivElement>('#app')!
 app.innerHTML = `
   <main style="margin:auto;padding:24px;max-width:680px;box-sizing:border-box;">
@@ -530,7 +681,7 @@ app.innerHTML = `
     </header>
     <pre id="mirror" style="background:#0a0d12;border:1px solid #2a3340;border-radius:12px;padding:20px;font:14px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre;color:#9fdc9f;margin:0;min-height:288px;"></pre>
     <footer style="font-size:12px;color:#7B7B7B;text-align:center;margin-top:16px;">
-      tap: progress · swipe up/down: select · double-tap: status
+      tap: progress . swipe up/down: select . double-tap: status
     </footer>
   </main>
 `
@@ -538,8 +689,21 @@ app.innerHTML = `
 function mirrorCompanion(): void {
   const mirror = document.getElementById('mirror')
   const meta = document.getElementById('meta')
-  if (mirror) mirror.textContent = render()
-  if (meta) meta.textContent = `screen: ${screen}  ·  rank: ${rankFor(state.streak)}  ·  streak: ${state.streak}`
+  if (mirror) {
+    // Overlay right values onto the left content using char-padding (approx).
+    const lines = renderLeft().split('\n')
+    const rvs = rightValuesForScreen()
+    const out = lines.map((line, idx) => {
+      const y = idx * LINE_H
+      const rv = rvs.find(r => r.yPosition === y)
+      if (!rv || !rv.text) return line
+      // strip last 14 chars of line and replace with right-padded value
+      const trimmed = line.length > 14 ? line.slice(0, line.length - 14) : line
+      return trimmed + rv.text.padStart(14, ' ')
+    })
+    mirror.textContent = out.join('\n')
+  }
+  if (meta) meta.textContent = `screen: ${screen} . rank: ${rankFor(state.streak)} . streak: ${state.streak}`
 }
 setInterval(mirrorCompanion, 1000)
 mirrorCompanion()
