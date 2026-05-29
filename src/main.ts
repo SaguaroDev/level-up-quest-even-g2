@@ -5,20 +5,24 @@ import {
   TextContainerUpgrade,
   OsEventTypeList,
 } from '@evenrealities/even_hub_sdk'
-import { getTextWidth } from '@evenrealities/pretext'
 
 // ─── Solo Leveling Hunter System ─────────────────────────────────────────────
 //
-// One repeating Daily Quest set, dictated by the System (canon). Tap on a goal
-// adds an increment of progress. Clear all four before UTC midnight to bank a
-// streak day. Miss and the System imposes a Penalty — streak resets and a
-// Penalty Zone screen greets you next.
+// One repeating Daily Quest set. Tap to increment progress on the highlighted
+// goal. Clear all four before UTC midnight to bank a streak day. Miss the
+// window and the Penalty Zone screen greets you next.
 //
-// Ranks: E → D → C → B → A → S, gated by streak length.
+// Ranks: E -> D -> C -> B -> A -> S, gated by streak length.
 //
-// Layout: 576×288 monochrome green, proportional font. Right-aligned values
-// (countdown, progress) live in their own pixel-positioned containers because
-// LVGL has no textAlign property — single-container char padding drifts.
+// Layout philosophy (rewritten May 23 2026):
+//
+// Single text container at xPosition=0, width=SAFE_TEXT_WIDTH, full height.
+// Pattern lifted from EvenChess (chess HUD that ships and works). The
+// waveguide aperture clips content past ~pixel 380; multi-container splits
+// with pixel-anchored right values were never readable on the test unit no
+// matter what gutter we tried. The fix is to never place text near the right
+// edge at all. All content lives in one left-anchored container with column
+// layout done by ASCII space padding.
 
 type QuestDef = {
   id: string
@@ -199,22 +203,21 @@ let screen: Screen = 'quest'
 let cursor = 0
 
 // ─── Layout geometry ─────────────────────────────────────────────────────────
+//
+// Waveguide-safe text region empirically lives between roughly pixel 0 and
+// pixel 380 on the test unit. We use a 540-px wide container as a generous
+// upper bound but never compose lines longer than ~40 ASCII chars so content
+// stays inside the safe zone regardless of proportional-font width variance.
+//
+// Single text container = simplest possible architecture. No pretext
+// measurements, no leading-space padding, no pixel anchoring, no parallel
+// container upgrades. Same model EvenChess (chess HUD, v2.0.4) uses.
 const SCREEN_W = 576
 const SCREEN_H = 288
-const PAD = 4               // container internal padding
-const LINE_H = 27           // LVGL line height
-const RIGHT_EDGE = SCREEN_W - PAD   // right pixel edge (reserved for future use)
-void RIGHT_EDGE
-const COLS = 56             // chars per line for the LEFT background container
+const PAD = 4
+const COLS = 40             // chars per line, conservative for proportional font
 
-// ─── Container IDs ───────────────────────────────────────────────────────────
-const CID_LEFT       = 1   // background frame + left-aligned content
-const CID_RIGHT_HEAD = 2   // header-right countdown
-const CID_RIGHT_Q1   = 3   // progress for quest 1
-const CID_RIGHT_Q2   = 4
-const CID_RIGHT_Q3   = 5
-const CID_RIGHT_Q4   = 6
-const CID_RIGHT_EXP  = 7   // status screen: exp number
+const CID_MAIN = 1
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function pad(s: string, width: number, align: 'left' | 'right' = 'left'): string {
@@ -229,60 +232,60 @@ function center(s: string, width = COLS): string {
   return ' '.repeat(left) + s
 }
 
-// Frame chars: only top/bottom dividers + LEFT vertical bar. We drop the RIGHT
-// vertical bar because the right-aligned value containers sit in that pixel
-// region and would either collide with it or be invisible past the waveguide's
-// safe zone. The frame looks like a "[" bracket opening to the right; right
-// values float in the unframed space.
-const FRAME_LINE = '+' + '-'.repeat(COLS - 2)
-function framed(line: string): string {
-  // Left bar `|`, content padded to inner width, NO right bar.
-  return `|${pad(line, COLS - 2)}`
+// Two-column row: label on the left, value column-anchored to a fixed character
+// position. NOT pixel-anchored to the right edge - that lost the multi-month
+// fight with the waveguide. Anchored to a column the LABEL field pads up to.
+// Proportional-font drift on the value's right edge is acceptable because the
+// eye reads LABEL+VALUE as a left-anchored unit.
+const VALUE_COL = 28        // column where the value starts (chars from x=0)
+function row(label: string, value: string): string {
+  // pad label up to VALUE_COL-1, append value
+  return pad(label, VALUE_COL - 1) + value
 }
 
-// ─── LEFT container content (the bulk of the layout) ─────────────────────────
-//
-// Right-edge VALUES are NOT in this content — they go in their own pixel-aligned
-// containers. To keep the right frame bar `|` aligned, the LEFT container draws
-// the FRAME (with the right `|` bar at column COLS-1) and reserves blank space
-// where the right-aligned values will overlay.
+const FRAME_LINE = '+' + '-'.repeat(COLS - 2) + '+'
+function framed(line: string): string {
+  return '|' + pad(line, COLS - 2) + '|'
+}
 
-function renderLeft(): string {
+// ─── Screen content (one composed string per screen) ─────────────────────────
+
+function renderScreen(): string {
   switch (screen) {
-    case 'disclaimer': return renderLeftDisclaimer()
-    case 'quest':      return renderLeftQuest()
-    case 'status':     return renderLeftStatus()
-    case 'penalty':    return renderLeftPenalty()
-    case 'clear':      return renderLeftClear()
+    case 'disclaimer': return renderDisclaimer()
+    case 'quest':      return renderQuest()
+    case 'status':     return renderStatus()
+    case 'penalty':    return renderPenalty()
+    case 'clear':      return renderClear()
   }
 }
 
-function renderLeftDisclaimer(): string {
+function renderDisclaimer(): string {
   return [
     '',
     center('[!]  LEVEL UP QUEST  [!]'),
     '',
-    center('A habit-tracking game inspired by'),
-    center('Solo Leveling. The exercises you'),
-    center('choose to perform are your own'),
-    center('responsibility. Consult a physician'),
-    center('before any exercise program. We accept'),
-    center('no responsibility for injury or illness.'),
+    center('A habit game inspired by'),
+    center('Solo Leveling. Exercises you'),
+    center('do are your responsibility.'),
+    center('Consult a physician before any'),
+    center('exercise program. No liability'),
+    center('for injury or illness.'),
     '',
     center('-- tap to accept --'),
   ].join('\n')
 }
 
-function renderLeftQuest(): string {
-  // Header strip: left side only. Right side (countdown) is its own container.
+function renderQuest(): string {
   const rank = rankFor(state.streak)
-  const headerLeft = `RANK ${rank}   STREAK ${state.streak}`
+  const countdown = formatCountdown(msUntilNextUtcMidnight(Date.now()))
 
   const lines: string[] = []
-  lines.push(headerLeft)
+  // Header row: rank+streak on the left, countdown column-anchored on the right
+  lines.push(row(`RANK ${rank}  STREAK ${state.streak}`, countdown))
   lines.push(FRAME_LINE)
-  lines.push(framed('  [!] QUEST INFO - DAILY QUEST'))
-  lines.push(framed('  TRAIN TO BECOME A FORMIDABLE COMBATANT'))
+  lines.push(framed(' DAILY QUEST'))
+  lines.push(framed(' Train to become a hunter.'))
   lines.push(FRAME_LINE)
 
   state.quests.forEach((q, i) => {
@@ -290,164 +293,75 @@ function renderLeftQuest(): string {
     const marker = i === cursor ? '>' : ' '
     const def = QUESTS.find(d => d.id === q.id)!
     const check = done ? '[x]' : '[ ]'
-    // Just the LABEL side — progress value is its own right-aligned container.
-    // Reserve the right portion with blank pad so the closing `|` lines up.
-    lines.push(framed(`${marker} ${check} ${def.label}`))
+    const label = `${marker} ${check} ${def.label}`
+    lines.push(row(label, progressLabel(q)))
   })
 
   lines.push(FRAME_LINE)
   if (allDone()) {
-    lines.push(center('-- ALL CLEAR - banks at 00:00 UTC --'))
+    lines.push(center('-- ALL CLEAR - banks 00:00 UTC --'))
+  } else {
+    lines.push(center('tap: +progress  swipe: select'))
   }
   return lines.join('\n')
 }
 
-function renderLeftStatus(): string {
+function renderStatus(): string {
   const { level, expInLevel } = levelFromExp(state.totalExp)
   const rank = rankFor(state.streak)
   const nextRank = nextRankThreshold(state.streak)
-  const toNextRank = nextRank == null ? '-- MAX --' : `${nextRank - state.streak} day(s)`
+  const toNextRank = nextRank == null ? 'MAX' : `${nextRank - state.streak}d`
 
-  const barCells = 30
+  const barCells = 20
   const filled = Math.round((expInLevel / EXP_PER_LEVEL) * barCells)
   const bar = '#'.repeat(filled) + '.'.repeat(barCells - filled)
 
   const lines: string[] = []
   lines.push(FRAME_LINE)
-  lines.push(framed('  [!]  STATUS'))
+  lines.push(framed(' STATUS'))
   lines.push(FRAME_LINE)
-  lines.push(framed(`  HUNTER       LVL ${level}   RANK ${rank}`))
-  // EXP number is its own right-aligned container.
-  lines.push(framed(`  EXP   ${bar}`))
-  lines.push(framed(`  STREAK       ${state.streak}   BEST ${state.best}`))
-  lines.push(framed(`  TOTAL DAYS   ${state.totalDays}`))
-  lines.push(framed(`  NEXT RANK    ${toNextRank}`))
+  lines.push(row(' HUNTER', `LVL ${level}`))
+  lines.push(row(' RANK', rank))
+  lines.push(row(' EXP', `${expInLevel}/${EXP_PER_LEVEL}`))
+  lines.push(' ' + bar)
+  lines.push(row(' STREAK', `${state.streak}`))
+  lines.push(row(' BEST', `${state.best}`))
+  lines.push(row(' TOTAL DAYS', `${state.totalDays}`))
+  lines.push(row(' NEXT RANK', toNextRank))
   lines.push(FRAME_LINE)
-  lines.push(center('-- double-tap to return --'))
+  lines.push(center('-- double-tap: back --'))
   return lines.join('\n')
 }
 
-function renderLeftPenalty(): string {
+function renderPenalty(): string {
   return [
     FRAME_LINE,
-    framed('  [!]  PENALTY ZONE'),
+    framed(' PENALTY ZONE'),
     FRAME_LINE,
-    framed('  THE DAILY QUEST REMAINED INCOMPLETE.'),
+    framed(' Daily Quest incomplete.'),
     framed(''),
-    framed('  PENALTIES HAVE BEEN GIVEN'),
-    framed('  ACCORDINGLY. STREAK RESET.'),
+    framed(' Penalty given.'),
+    framed(' Streak reset.'),
     FRAME_LINE,
     center('-- tap to continue --'),
   ].join('\n')
 }
 
-function renderLeftClear(): string {
+function renderClear(): string {
   const { level } = levelFromExp(state.totalExp)
   const rank = rankFor(state.streak)
   return [
     FRAME_LINE,
-    framed('  [!]  QUEST COMPLETE'),
+    framed(' QUEST COMPLETE'),
     FRAME_LINE,
-    framed('  ALL GOALS CLEARED.'),
+    framed(' All goals cleared.'),
     framed(''),
-    framed(`  STREAK   x${state.streak}    RANK   ${rank}`),
-    framed(`  LEVEL    ${level}`),
+    row(' STREAK', `x${state.streak}`),
+    row(' RANK', rank),
+    row(' LEVEL', `${level}`),
     FRAME_LINE,
     center('-- tap to continue --'),
   ].join('\n')
-}
-
-// ─── Right-anchored value containers ─────────────────────────────────────────
-//
-// Each right-aligned value lives in its own container, positioned at
-// x = RIGHT_EDGE - getTextWidth(value). The container width is just wide enough
-// for the value, and the content is its only line — so the result is pixel-
-// perfect right-alignment regardless of digit count.
-//
-// We also have to LEAVE ROOM for the frame's right `|` bar — so we anchor to
-// (RIGHT_EDGE - frameBarWidth - 2). For the LEFT container, the frame `|`
-// already occupies column COLS-1.
-
-// We pre-create containers for every right-value we might ever need (max 4
-// quest rows + 1 header + 1 status-exp = 6 right containers). On screen change
-// we set unused containers to empty string.
-
-type RightValue = {
-  cid: number
-  text: string       // value to display ('' = hidden)
-  yPosition: number  // top edge in px
-}
-
-// Approximate y positions (top of each row) for the Quest screen:
-//   row 0 (header):   y=0
-//   row 1 (frame):    y=27
-//   row 2 (info):     y=54
-//   row 3 (info):     y=81
-//   row 4 (frame):    y=108
-//   row 5 (q1):       y=135
-//   row 6 (q2):       y=162
-//   row 7 (q3):       y=189
-//   row 8 (q4):       y=216
-//   row 9 (frame):    y=243
-//   row 10 (clear):   y=270
-//
-// For status screen, EXP value sits on row index 5 (HUNTER LVL+RANK is row 4,
-// EXP is row 5).
-
-const Y_HEADER = 0
-const Y_Q_BASE = 5 * LINE_H   // first quest row
-const Y_EXP = 5 * LINE_H
-
-function rightValuesForScreen(): RightValue[] {
-  if (screen === 'quest') {
-    const countdown = formatCountdown(msUntilNextUtcMidnight(Date.now()))
-    const out: RightValue[] = [
-      { cid: CID_RIGHT_HEAD, text: countdown, yPosition: Y_HEADER },
-    ]
-    state.quests.forEach((q, i) => {
-      const cid = [CID_RIGHT_Q1, CID_RIGHT_Q2, CID_RIGHT_Q3, CID_RIGHT_Q4][i]!
-      out.push({ cid, text: progressLabel(q), yPosition: Y_Q_BASE + i * LINE_H })
-    })
-    out.push({ cid: CID_RIGHT_EXP, text: '', yPosition: Y_EXP })
-    return out
-  }
-
-  if (screen === 'status') {
-    const { expInLevel } = levelFromExp(state.totalExp)
-    return [
-      { cid: CID_RIGHT_HEAD, text: '', yPosition: Y_HEADER },
-      { cid: CID_RIGHT_Q1,   text: '', yPosition: Y_Q_BASE },
-      { cid: CID_RIGHT_Q2,   text: '', yPosition: Y_Q_BASE + LINE_H },
-      { cid: CID_RIGHT_Q3,   text: '', yPosition: Y_Q_BASE + 2 * LINE_H },
-      { cid: CID_RIGHT_Q4,   text: '', yPosition: Y_Q_BASE + 3 * LINE_H },
-      { cid: CID_RIGHT_EXP,  text: String(expInLevel), yPosition: Y_EXP },
-    ]
-  }
-
-  // disclaimer, penalty, clear — hide every right value.
-  return [
-    { cid: CID_RIGHT_HEAD, text: '', yPosition: Y_HEADER },
-    { cid: CID_RIGHT_Q1,   text: '', yPosition: Y_Q_BASE },
-    { cid: CID_RIGHT_Q2,   text: '', yPosition: Y_Q_BASE + LINE_H },
-    { cid: CID_RIGHT_Q3,   text: '', yPosition: Y_Q_BASE + 2 * LINE_H },
-    { cid: CID_RIGHT_Q4,   text: '', yPosition: Y_Q_BASE + 3 * LINE_H },
-    { cid: CID_RIGHT_EXP,  text: '', yPosition: Y_EXP },
-  ]
-}
-
-// Approximate text width when the SDK's pretext isn't available (rare edge).
-function approxWidth(s: string): number {
-  // Fall back to ~10px per char. Will look off but at least visible.
-  return s.length * 10
-}
-
-function measureWidth(s: string): number {
-  if (!s) return 0
-  try {
-    return getTextWidth(s)
-  } catch {
-    return approxWidth(s)
-  }
 }
 
 // ─── Bridge boot ─────────────────────────────────────────────────────────────
@@ -463,78 +377,20 @@ if (!state.disclaimerAccepted) {
   else screen = 'quest'
 }
 
-// Reserve room on the right for the value containers; the LEFT container still
-// spans the full screen so the frame's `|` bar lives at column COLS-1.
-const leftContainer = new TextContainerProperty({
-  xPosition: 0, yPosition: 0, width: SCREEN_W, height: SCREEN_H,
+// Single text container, left-anchored, full safe width.
+const mainContainer = new TextContainerProperty({
+  xPosition: 0, yPosition: 0,
+  width: SCREEN_W, height: SCREEN_H,
   borderWidth: 0, borderColor: 5, paddingLength: PAD,
-  containerID: CID_LEFT, containerName: 'left',
-  content: renderLeft(),
+  containerID: CID_MAIN, containerName: 'main',
+  content: renderScreen(),
   isEventCapture: 1,
-})
-
-// Right containers are created with placeholder widths; we resize implicitly by
-// changing xPosition via... wait, container geometry is set at create-time and
-// not re-settable from textContainerUpgrade. Strategy: make each right container
-// FIXED WIDTH (just wide enough for the widest expected value) and update its
-// CONTENT padded on the LEFT with spaces so the visible end of the text sits
-// at the same right pixel. Spaces in a left-aligned container push content
-// rightward by a known pixel amount per space.
-//
-// We use pretext.getTextWidth to compute, per update, how many leading spaces
-// the value needs to right-align inside the container's fixed inner width.
-
-const RIGHT_INNER_W = 110   // max pixel budget for a right-aligned value (12 chars * ~9px)
-const RIGHT_OUTER_W = RIGHT_INNER_W + 2 * PAD
-// Anchor right edge of these containers WELL inside the waveguide safe zone.
-// The G2's 576px raw frame extends beyond the visible/comfortable viewing
-// area — content near the right edge gets clipped or pushed out of focus.
-// Live-tested iterations:
-//   gutter=12  → values clipped, only `|` brackets visible at far right
-//   gutter=80  → values still outside visible zone
-//   gutter=180 → values land mid-screen, way too far left
-//   gutter=100 → values readable but still want them pushed right
-//   gutter=60  → current target
-const RIGHT_GUTTER = 60
-const RIGHT_X = SCREEN_W - RIGHT_OUTER_W - RIGHT_GUTTER
-
-function makeRightContainer(cid: number, y: number, name: string): TextContainerProperty {
-  return new TextContainerProperty({
-    xPosition: RIGHT_X, yPosition: y,
-    width: RIGHT_OUTER_W, height: LINE_H,
-    borderWidth: 0, borderColor: 0, paddingLength: PAD,
-    containerID: cid, containerName: name,
-    content: '',
-    isEventCapture: 0,
-  })
-}
-
-const initialRightValues = rightValuesForScreen()
-const rightContainers = initialRightValues.map(rv =>
-  makeRightContainer(rv.cid, rv.yPosition, `r${rv.cid}`)
-)
-
-// Right-align a value within RIGHT_INNER_W by prepending the right number of
-// leading spaces. measureWidth(' ') gives us per-space cost.
-const SPACE_W = Math.max(1, measureWidth(' ') || 5)
-function rightAlignedContent(value: string): string {
-  if (!value) return ''
-  const valueW = measureWidth(value)
-  const gap = RIGHT_INNER_W - valueW
-  if (gap <= 0) return value
-  const spaces = Math.max(0, Math.floor(gap / SPACE_W))
-  return ' '.repeat(spaces) + value
-}
-
-// Populate right containers with their initial values.
-initialRightValues.forEach((rv, i) => {
-  rightContainers[i]!.content = rightAlignedContent(rv.text)
 })
 
 const created = await bridge.createStartUpPageContainer(
   new CreateStartUpPageContainer({
-    containerTotalNum: 1 + rightContainers.length,
-    textObject: [leftContainer, ...rightContainers],
+    containerTotalNum: 1,
+    textObject: [mainContainer],
   }),
 )
 if (created !== 0) console.error('createStartUpPageContainer failed:', created)
@@ -544,24 +400,13 @@ let rendering: Promise<unknown> = Promise.resolve()
 
 function refresh(): void {
   rendering = rendering.then(async () => {
-    // Update LEFT first so the frame is in place before values appear.
     await bridge.textContainerUpgrade(
       new TextContainerUpgrade({
-        containerID: CID_LEFT,
-        containerName: 'left',
-        content: renderLeft(),
+        containerID: CID_MAIN,
+        containerName: 'main',
+        content: renderScreen(),
       }),
     )
-    // Then each right-aligned value in sequence.
-    for (const rv of rightValuesForScreen()) {
-      await bridge.textContainerUpgrade(
-        new TextContainerUpgrade({
-          containerID: rv.cid,
-          containerName: `r${rv.cid}`,
-          content: rightAlignedContent(rv.text),
-        }),
-      )
-    }
   })
 }
 
@@ -681,10 +526,6 @@ function cleanup(): void {
 window.addEventListener('beforeunload', cleanup)
 
 // ─── Browser companion mirror ────────────────────────────────────────────────
-//
-// The browser companion uses a monospace font, so it'll show alignment
-// differently from the glasses. Keep it for state debugging, not visual fidelity.
-
 const app = document.querySelector<HTMLDivElement>('#app')!
 app.innerHTML = `
   <main style="margin:auto;padding:24px;max-width:680px;box-sizing:border-box;">
@@ -702,20 +543,7 @@ app.innerHTML = `
 function mirrorCompanion(): void {
   const mirror = document.getElementById('mirror')
   const meta = document.getElementById('meta')
-  if (mirror) {
-    // Overlay right values onto the left content using char-padding (approx).
-    const lines = renderLeft().split('\n')
-    const rvs = rightValuesForScreen()
-    const out = lines.map((line, idx) => {
-      const y = idx * LINE_H
-      const rv = rvs.find(r => r.yPosition === y)
-      if (!rv || !rv.text) return line
-      // strip last 14 chars of line and replace with right-padded value
-      const trimmed = line.length > 14 ? line.slice(0, line.length - 14) : line
-      return trimmed + rv.text.padStart(14, ' ')
-    })
-    mirror.textContent = out.join('\n')
-  }
+  if (mirror) mirror.textContent = renderScreen()
   if (meta) meta.textContent = `screen: ${screen} . rank: ${rankFor(state.streak)} . streak: ${state.streak}`
 }
 setInterval(mirrorCompanion, 1000)
